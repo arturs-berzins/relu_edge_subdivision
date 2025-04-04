@@ -2,10 +2,14 @@
 ### **[arXiv](https://arxiv.org/abs/2306.07212)** | **[PMLR](https://proceedings.mlr.press/v202/berzins23a.html)** | **[Extended abstract](https://openreview.net/forum?id=QrJ6WaWfuP)** | **[Presentation & Poster](https://icml.cc/virtual/2023/poster/23539)**
 
 
+<img src="media/bunny.png" width="800"/>
+
+
 Compute the polyhedral complex associated with a ReLU network.
 Contrary to previous methods the proposed method subdivides edges, which alleviates computational redundancy and affords simple data structures and GPU acceleration.
 
 This repo implements the proposed algorithm in vanilla `PyTorch` with `CUDA` support.
+
 
 
 ## BibTeX
