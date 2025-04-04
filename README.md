@@ -3,6 +3,7 @@
 
 
 <img src="media/bunny.png" width="800"/>
+View an interactive 3D version [here](https://html-preview.github.io/?url=https://github.com/arturs-berzins/relu_edge_subdivision/blob/master/media/bunny_nopanel.html)!
 
 
 Compute the polyhedral complex associated with a ReLU network.
