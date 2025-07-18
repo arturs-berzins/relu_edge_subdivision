@@ -50,10 +50,14 @@ def plot_verts_and_edges(vs, edges, e_labels=None, v_labels=None, show=True, ver
     if e_labels is not None and edges is not None:
         for edge, label in zip(edges, e_labels):
             pos = vs[edge].mean(0)
-            ax.text(*pos, label, ha='center', va='center', color='blue', fontsize=8, zorder=10)
+            ax.text(*pos, label, ha='center', va='center', color='blue', fontsize=10, zorder=10, weight="bold", 
+                    bbox=dict(facecolor='white', edgecolor='none', boxstyle='round,pad=0.0')
+                    )
     ## Vertex labels
     if v_labels is not None:
         for pos, label in zip(vs, v_labels):
-            ax.text(*pos, label, ha='center', va='center', color='green', fontsize=8, zorder=10)
+            ax.text(*pos, label, ha='center', va='center', color='green', fontsize=10, zorder=10, weight="bold", 
+                    bbox=dict(facecolor='white', edgecolor='none', boxstyle='round,pad=0.0')
+                    )
     if not show: return ax
     plt.show()

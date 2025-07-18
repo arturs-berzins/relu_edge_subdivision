@@ -38,33 +38,7 @@ def sv_to_tb(sv):
 
 def get_labels(svs, B=0):
     '''Generate a list of labels from sign-vectors. Skip the first B signs.'''
-    return [''.join(row) for row in alphabet[svs]]
+    return [''.join(row) for row in alphabet[svs[:,B:]]]
 
 def bits_to_int(bits, d, dim):
     return (bits*(2**torch.arange(d-1,-1,-1))).sum(dim)
-
-def get_unit_hypercube(d):
-    '''
-    Builds a unit hypercube in d-dimensions.
-    vs_bits contains coordinates as booleans.
-    edges contains pairs of integers referencing vertices.
-    '''
-    ### Hypercube ###
-
-    ### Vertices
-    vs_bits = torch.tensor(np.stack(np.meshgrid(*[[False,True]]*d)), dtype=bool).flatten(start_dim=1).T
-    ## Sort, so the int representing the bit corresponds to its index. Important for edges
-    vs_bits = vs_bits[bits_to_int(vs_bits, d, 1).sort().indices]
-
-    ### Edges
-    ## Repeat vertex bits d times
-    dits = vs_bits.repeat(d,1,1)
-    ## For each dimension, flip a single bit 
-    for i in range(d): ## TODO: maybe some vector operation with eye or arange?
-        dits[i,:,d-i-1] = ~dits[i,:,d-i-1]
-    ## Build edges by converting bits to integers and joining with arange, which is the original edge.
-    ee = torch.stack([torch.arange(2**d).repeat(d,1).T, bits_to_int(dits, d, 2).T]).flatten(start_dim=1).T
-    ## Filter duplicate edges
-    edges = ee[ee[:,0]<ee[:,1]]
-
-    return vs_bits, edges ## NOTE: ideally edges would be uint32, but torch does not support this
