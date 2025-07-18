@@ -42,3 +42,10 @@ def get_labels(svs, B=0):
 
 def bits_to_int(bits, d, dim):
     return (bits*(2**torch.arange(d-1,-1,-1))).sum(dim)
+
+def lin_interp(x1, x2, y1, y2):
+    return y1 - x1*(y2-y1)/(x2-x1)
+
+def get_e_sv(v_sv, edges):
+    """Build edge sign-vectors from vertex sign-vectors."""
+    return v_sv[edges].sum(1, dtype=torch.int8).sign()

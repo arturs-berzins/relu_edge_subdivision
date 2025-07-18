@@ -10,21 +10,18 @@ TODO:
 - Split off visualization code 
 '''
 
+import relu_pairing ## need to have relu_pairing pip installed: github.com/chunyang-w/relu_pairing
+from utils import lin_interp, get_e_sv
 import torch
 import numpy as np
-from torch import Tensor, BoolTensor
+## For logging
 from time import time
 import sys, gc ## for memory
 
 torch.backends.cuda.matmul.allow_tf32 = False ## NOTE: important for consistency between cpu and cuda https://github.com/pytorch/pytorch/issues/77397
 
-from utils import get_unit_hypercube
 
-def get_e_sv(v_sv, edges):
-    """Build edge sign-vectors from vertex sign-vectors."""
-    return v_sv[edges].sum(1, dtype=torch.int8).sign()
-
-def get_intersecting_via_perturb(em_sv, d):
+def get_intersecting_via_perturb(em_sv, d, B, pairing_method="hash", cuda_hash_method="sorted"):
     '''
     Find intersecting edges (face, hyperplane intersections).
     Take all splitting edges. For each splitting edge find all incident faces by perturbing the sign-vector.
@@ -38,6 +35,9 @@ def get_intersecting_via_perturb(em_sv, d):
     This are the indices of edges in the _splitting_ edge array i.e. _masked_ edge array. 
     E.g. e_tb[:,split_edge_mask][i] is the tb of the first edge.
     Convert to index in the full edge array via split_edge_mask.nonzero()[:,0][i]
+    
+    pairing_method: sort or hash
+    cuda_hash_method: simple or sorted
     '''
     ## TODO: constants
     device = em_sv.device
@@ -61,32 +61,60 @@ def get_intersecting_via_perturb(em_sv, d):
     idxs = (rnge_dim.repeat_interleave(len(em_sv)),) \
         + tuple(zero_idxs.reshape(len(em_sv), d-1, 2).permute(1,0,2).flatten(end_dim=1).T)
 
-    ## Perturb to +-. TODO: perturb boundary cells only toward + to make b a bit smaller. Not sure if modulo will work though.
+    ## Perturb to +-
     incident_faces_sv[0][idxs] = 1
     incident_faces_sv[1][idxs] = -1
 
+    ## Filter edges that are outside of the domain. CUDA kernel expects strict pairs.
     ## Make a long list (a 2D tensor) of all face sign-vectors. Permute so we can use modulo in the end.
     b = incident_faces_sv.permute(1,0,2,3).flatten(end_dim=2)
+    
+    ## Find entries in b that have -1 in any of the first B positions
+    invalid_mask = (b[:, :B] == -1).any(dim=1)
+    ## Disable masking like this
+    # invalid_mask = torch.zeros(len(b), dtype=bool)
+    
+    ## Inverse mask: keep only rows with no backward perturbation in first B
+    valid_mask = ~invalid_mask
 
-    ### Find unique faces and their edges ###
-    if device.type=='cuda':
-        ## On cuda unique is faster: find unique faces and the indices telling where each face (perturbed edge) from b is in unique faces. 
-        _, inv = b.unique(dim=0, return_inverse=True)
-        ## If we sort the inv, the perturbed edge pairs from b will be together in the sorted list.
-        inv_sorted, inv_inds = inv.sort()
-        ## Two same subsequent entries indicate a splitting face and a face-novel edge
-        idxs_of_edge_pairs_in_inv = (~inv_sorted.diff().bool()).nonzero() ## Maybe bool mask?
-        ## Now, indices of both perturbed edges sharing the face are offset by one. Convert these indices into b array indexing via inv_inds.
-        ## Lastly, find indices of the edge pairs in the previous edge list by reversing the repeat with modulo.
-        novel_idxs_of_adj_edges = inv_inds[torch.hstack([idxs_of_edge_pairs_in_inv, idxs_of_edge_pairs_in_inv+1])] %len(em_sv)
-    else:
-        ## On cpu lexsort is faster. Part of the reason is that pytorch cuda just does not have a native lexsort.
-        ## The best available port is decent, but still worse than the native unique. This might be different with JAX.
-        ## https://dagshub.com/safraeli/attention-learn-to-route/src/674e5760ce82183a56c94f453aaaf37fdf8e1953/utils/lexsort.py
-        b_lex_idxs = torch.from_numpy(np.lexsort(b.numpy().T))
-        b_lex = b[b_lex_idxs]
-        idxs_of_edge_pairs_in_lex = torch.all(~b_lex.diff(dim=0).bool(), dim=1).nonzero()[:,0]
-        novel_idxs_of_adj_edges = b_lex_idxs[torch.vstack([idxs_of_edge_pairs_in_lex, idxs_of_edge_pairs_in_lex+1]).T]%len(em_sv)
+    ## Apply the mask to b and remember original indices
+    b_valid = b[valid_mask]
+    valid_orig_idxs = valid_mask.nonzero(as_tuple=False).squeeze(1)
+
+
+    if pairing_method=="sort":
+        ### Find unique faces and their edges ###
+        if device.type=='cuda':
+            ## On cuda unique is faster: find unique faces and the indices telling where each face (perturbed edge) from b is in unique faces. 
+            _, inv = b_valid.unique(dim=0, return_inverse=True)
+            ## If we sort the inv, the perturbed edge pairs from b will be together in the sorted list.
+            inv_sorted, inv_inds = inv.sort()
+            ## Two same subsequent entries indicate a splitting face and a face-novel edge
+            idxs_of_edge_pairs_in_inv = (~inv_sorted.diff().bool()).nonzero() ## Maybe bool mask?
+            ## Now, indices of both perturbed edges sharing the face are offset by one. Convert these indices into b array indexing via inv_inds.
+            ## Lastly, find indices of the edge pairs in the previous edge list by reversing the repeat with modulo.
+            pairs_in_b_valid = inv_inds[torch.hstack([idxs_of_edge_pairs_in_inv, idxs_of_edge_pairs_in_inv+1])]
+        else:
+            ## On cpu lexsort is faster. Part of the reason is that pytorch cuda just does not have a native lexsort.
+            ## The best available port is decent, but still worse than the native unique. This might be different with JAX.
+            ## https://dagshub.com/safraeli/attention-learn-to-route/src/674e5760ce82183a56c94f453aaaf37fdf8e1953/utils/lexsort.py
+            b_lex_idxs = torch.from_numpy(np.lexsort(b_valid.numpy().T))
+            b_lex = b_valid[b_lex_idxs]
+            idxs_of_edge_pairs_in_lex = torch.all(~b_lex.diff(dim=0).bool(), dim=1).nonzero()[:,0]
+            pairs_in_b_valid = b_lex_idxs[torch.vstack([idxs_of_edge_pairs_in_lex, idxs_of_edge_pairs_in_lex+1]).T]
+    
+    elif pairing_method=="hash":
+        if device.type=="cuda":
+            if cuda_hash_method=="sorted":
+                method = relu_pairing.ops.hash_pair_rows_sorted ## fastest with caching
+            else:
+                method = relu_pairing.ops.hash_pair_rows_simple ## simple
+        else:
+            method = relu_pairing.ops.hash_pair_rows    
+        pairs_in_b_valid = method(b_valid.to(torch.long))
+
+    pairs_in_b = valid_orig_idxs[pairs_in_b_valid]
+    novel_idxs_of_adj_edges = pairs_in_b%len(em_sv)
 
     ## em_sv[novel_idxs_of_adj_edges] are the sign-vectors of pairs of adjacent edges.
     ## They will have a single common 0 entry and D different entries where one is 0 at he other is +-.
@@ -94,10 +122,18 @@ def get_intersecting_via_perturb(em_sv, d):
     # print(em_sv[novel_idxs_of_adj_edges])
     return novel_idxs_of_adj_edges ## These indices are for the masked edge array of splitting edges
 
-def lin_interp(x1, x2, y1, y2):
-    return y1 - x1*(y2-y1)/(x2-x1)
 
-def skeletal_subdivision(f, bbox=(-1,1), device=None, verbose=True, plot=False, prune=False, return_intermediate=False, return_memory=False, allow_non_generic=True):
+def skeletal_subdivision(f, vs, v_sv, edges, 
+                         device=None, 
+                         verbose=True, 
+                         plot=False, 
+                         prune=False, 
+                         return_intermediate=False, 
+                         return_memory=False, 
+                         allow_non_generic=True,
+                         pairing_method="hash", 
+                         cuda_hash_method="sorted",
+                         ):
     '''
     Skeletal sub-division: sequential evaluation of vertices with the NN.
     '''
@@ -111,24 +147,9 @@ def skeletal_subdivision(f, bbox=(-1,1), device=None, verbose=True, plot=False, 
 
     ## Dimension of input
     d = f.ks[0]
-
-    ## Hypercube
-    vs_bits, edges = get_unit_hypercube(d)
-    vs_bits = vs_bits.to(device)
-    edges = edges.to(device)
-
-    ## Vertex coordinates by transforming unit hypercube vertices
-    vs = (vs_bits*(bbox[1]-bbox[0]) + bbox[0]).float() ## NOTE: here we can easily use different ranges for each dimension
-
-    ## Vertex sign-vectors
-    v_sv = torch.hstack([vs_bits, ~vs_bits]).to(dtype=torch.int8)
-    del vs_bits
-
-    ## Edge sign-vectors: if either vertex is +, the edge is +. This behaviour can be compactly computed using the sum
-    e_sv = v_sv[edges].sum(1, dtype=torch.int8).sign()
-
-    ## Bounding box constraints
-    B = 2*d
+    
+    ## Number of domain hyperplanes
+    B = len(v_sv.T)
 
     if return_intermediate:
         intermediates = {}
@@ -216,14 +237,21 @@ def skeletal_subdivision(f, bbox=(-1,1), device=None, verbose=True, plot=False, 
             ## Simple in principle, a bit messy in implementation
 
 
-            ### Intersecting edges ###
+            ### (5) Intersecting edges ### NOTE: LOGML25: edit this step
             em_sv = get_e_sv(v_sv, edges[splitting_edge_mask])
-            
-            novel_idxs_of_adj_edges = get_intersecting_via_perturb(em_sv, d) ## TODO: clean up documentation, rename
+            novel_idxs_of_adj_edges = get_intersecting_via_perturb(em_sv, d, B, pairing_method, cuda_hash_method) ## TODO: clean up documentation, rename
             ## The indices of old parent edges that host the two vertices of the splitting edge:
             ## split_edge_mask.nonzero()[:,0][novel_idxs_of_adj_edges] 
             ## The coordinates of the new vertex pairs of the edge:
             ## novel_coords[novel_idxs_of_adj_edges]
+            
+            ### Alternative code here
+            # new vertex locations (coordiantes)
+            # vs_new = novel_coords 
+            # new vertex sign sequences (previous edge + 0 at the end)
+            # v_sv_new = torch.hstack([em_sv, torch.zeros(len(novel_coords),1, dtype=torch.int8, device=device)])
+            # the result should agree with novel_idxs_of_adj_edges up to permutation
+            ###
 
             ### UPDATE ###
             ### Verts ###
@@ -285,17 +313,49 @@ def skeletal_subdivision(f, bbox=(-1,1), device=None, verbose=True, plot=False, 
 
 if __name__=="__main__":
     from NN import Net, NetBunny
-    ### Define a NN ###
-    # torch.manual_seed(12); f = Net(ks=[3,2,1]); bbox = -10, 10 ## running example
-    f = NetBunny(dim=3, depth=3, width=16); bbox = -.5, .5
-    B = 2*f.ks[0] ## number of hyperplanes defining the domain is 2*input_dim. This holds just for the hyperrectangle
+    import domains
+    
+    ### Network ###
+    # torch.manual_seed(10); f = Net(ks=[784,48,48,1]); bbox = -1e-2, 1e-2
+    f = NetBunny(dim=3, depth=3, width=16)
+
+    ### Domain 
+    D = f.ks[0]
+    domain = "simplex"
+    bbox = -1.6, 1.6 # bunny
+    # domain = "hypercube"
+    # bbox = -.5, .5 # bunny
+
+    if domain=="hypercube":
+        ## HYPERCUBE
+        vs, edges, v_sv = domains.get_hypercube(D, bbox)
+
+    elif domain=="simplex":
+        # SIMPLEX EQUI
+        center = torch.zeros(D)
+        vs, edges, v_sv = domains.get_simplex(center, bbox[1]-bbox[0])
+
+    elif domain=="simplex_rightangle":
+        ## SIMPLEX RIGHTANGLE
+        center = torch.zeros(D) - 0.5
+        vs, edges, v_sv = domains.get_simplex_rightangle(center, bbox[1]-bbox[0])
+
+
+
+    ## Store domain (for plotting only)
+    vs_init, v_sv_init, edges_init = vs, v_sv, edges
+    B = len(v_sv.T) # Number of hyperplanes
+
 
     ### Run subdivision ###
+    device = 'cuda'
+    vs = vs.to(device)
+    v_sv = v_sv.to(device)
+    edges = edges.to(device)
+
     with torch.no_grad():
         # torch.rand(1, device='cuda') ## intialize cuda context, if you want to do automated timings
-        torch.backends.cuda.matmul.allow_tf32 = False ## NOTE: important for consistency between cpu and cuda https://github.com/pytorch/pytorch/issues/77397
-        # vs, edges, v_sv = skeletal_subdivision(f, device='cuda', plot=0, prune=0, bbox=bbox)
-        vs, edges, v_sv = skeletal_subdivision(f, device='cpu', plot=0, prune=1, bbox=bbox)
+        vs, edges, v_sv = skeletal_subdivision(f, vs, v_sv, edges, device=device, plot=0, prune=0, pairing_method="hash", cuda_hash_method="sorted")
 
 
     ### Plot ###
@@ -304,8 +364,8 @@ if __name__=="__main__":
     # e_sv = get_e_sv(v_sv, edges)
     # plot_verts_and_edges(vs, edges, verts=1, bbox=bbox)
     # plot_verts_and_edges(vs, edges, e_labels=get_labels(e_sv, B=B), verts=False, bbox=bbox)
-    # plot_verts_and_edges(vs, edges, verts=0, edge_colors=np.where(e_sv[:,-1].cpu()==0, 'g', 'k'), bbox=bbox) ## Highlight the iso-edges
-    
+    # plot_verts_and_edges(vs, edges, e_labels=get_labels(e_sv, B=0), v_labels=get_labels(v_sv, B=0), bbox=bbox)
+    # plot_verts_and_edges(vs, edges, verts=0, edge_colors=np.where(e_sv[:,-1].cpu()==0, 'g', 'k'), bbox=bbox) ## Highlight the iso-edges    
 
     ### Store results ### 
     # import pickle
