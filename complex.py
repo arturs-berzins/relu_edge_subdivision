@@ -115,32 +115,3 @@ class Complex():
         face_idxs = self.cells[idx]
         vertss, indicess = zip(*[self.get_face_mesh(face_idx) for face_idx in face_idxs])
         return combine_meshes(vertss, indicess)
-    
-
-
-if __name__=="__main__":
-    import pickle
-    with open(f"stores/[3, 2, 1]_sv", "rb") as file:
-        storage = pickle.load(file)
-
-    vtransform = lambda vs : vs/10
-
-    vs, edges, v_sv, e_sv = storage
-
-    # complex = Complex(*storage, vtransform=vtransform, do_build_mesh_helpers=1)
-    # m = complex.get_all_face_mesh(0)
-    # print(m)
-
-    # m = complex.get_cell_mesh(0)
-    # print(m)
-
-    from skeleton_extraction import skeletal_subdivision
-    from overfit import Overfit
-    f = Overfit(latent_dim=16, n_hidden=3, path_prefix="./")
-    bbox = (-.5, .5)
-    vs, edges_all, v_sv, e_sv_all = skeletal_subdivision(f, device='cpu', plot=0, prune=0, bbox=bbox, verbose=0)
-    boundary_mask = e_sv_all[:,-1]==0
-    e_sv = e_sv_all[boundary_mask]
-    edges = edges_all[boundary_mask]
-    c = Complex(vs.detach(), edges.detach(), v_sv.detach(), e_sv.detach(), do_build_mesh_helpers=1)
-    print(c.get_all_face_mesh(-1))
